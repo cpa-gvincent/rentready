@@ -1,0 +1,50 @@
+# Databricks Asset Bundle — deploys pipelines, jobs, and the app from this repo.
+# Deploy:  databricks bundle deploy -t dev
+# Run:     databricks bundle run rentready_ingest_and_screen -t dev
+bundle:
+  name: rentready
+
+include:
+  - resources/*.yml
+
+variables:
+  tenant:
+    description: Customer/agent id; isolates data per tenant.
+    default: demo
+  licensed_catalog:
+    description: Unity Catalog for licensed, provenance-restricted data (MLS/AVM).
+    default: rentready_dev_licensed
+  public_catalog:
+    description: Unity Catalog for public data (gov/assessor/licensed public APIs).
+    default: rentready_dev_public
+  warehouse_id:
+    description: SQL warehouse the app queries.
+    default: ""
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+    variables:
+      licensed_catalog: rentready_dev_licensed
+      public_catalog: rentready_dev_public
+
+  staging:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/staging
+    variables:
+      licensed_catalog: rentready_staging_licensed
+      public_catalog: rentready_staging_public
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/prod
+    variables:
+      licensed_catalog: rentready_prod_licensed
+      public_catalog: rentready_prod_public
