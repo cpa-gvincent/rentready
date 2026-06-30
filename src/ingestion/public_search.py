@@ -25,6 +25,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 LANDING_DIR = os.environ.get("RENTREADY_LANDING", "/tmp/rentready/bronze_landing")
+UC_VOLUME_PATH = "/Volumes/gjhinc/ingestion/bronze_landing"
 
 
 @dataclass
@@ -374,22 +375,20 @@ def search(
         if fn is None:
             continue  # unknown sources skipped earlier
         if not any(r.get("source") == name for r in all_records):
-            all_records.append({
-                "source": name,
-                "listing_key": f"{name}_search_url",
-                "address": f"{criteria.city}, {criteria.state}",
-                "city": criteria.city,
-                "state": criteria.state,
-                "search_url": urls.get(name, ""),
-                "beds": criteria.beds,
-                "baths": criteria.baths,
-                "list_price": None,
-                "property_type": criteria.property_type,
-                "estimate_source": "public_search_url",
-                "ParcelNumber": f"URL-{name}-{criteria.city}",
-                "ListingKey": f"{name}_search_url",
-                "UnparsedAddress": f"{criteria.city}, {criteria.state}",
-            })
+            fallback_listing = Listing(
+                source=name,
+                listing_key=f"{name}_search_url",
+                address=f"{criteria.city}, {criteria.state}",
+                city=criteria.city,
+                state=criteria.state,
+                beds=criteria.beds,
+                baths=criteria.baths,
+                property_type=criteria.property_type,
+                estimate_source="public_search_url",
+            )
+            row = fallback_listing.to_bronze_row()
+            row["search_url"] = urls.get(name, "")
+            all_records.append(row)
 
     if not all_records:
         logger.info("No listings found from any source")

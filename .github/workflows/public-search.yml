@@ -65,24 +65,23 @@ jobs:
           path: ${{ runner.temp }}/bronze_landing/*.jsonl
           retention-days: 7
 
-      - name: Push to Databricks bronze landing
+      - name: Push to Databricks UC volume (bronze landing)
         env:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           DATABRICKS_HOST: https://dbc-64a7e3a8-a95d.cloud.databricks.com
         run: |
+          # Install and configure Databricks CLI
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          cat > ~/.databrickscfg <<EOF
+          [DEFAULT]
+          host = $DATABRICKS_HOST
+          token = $DATABRICKS_TOKEN
+          EOF
           for f in "$RENTREADY_LANDING"/*.jsonl; do
             [ -f "$f" ] || continue
             name=$(basename "$f")
-            encoded=$(base64 -w0 "$f")
-            curl -s -X POST "$DATABRICKS_HOST/api/2.0/workspace/mkdirs" \
-              -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"path\": \"/Workspace/Users/george@gjh-inc.com/.bundle/rentready/dev/files/data\"}"
-            curl -s -X POST "$DATABRICKS_HOST/api/2.0/workspace/import" \
-              -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"path\": \"/Workspace/Users/george@gjh-inc.com/.bundle/rentready/dev/files/data/$name\", \"format\": \"RAW\", \"content\": \"$encoded\", \"overwrite\": true}"
-            echo "Uploaded $name to Databricks"
+            databricks fs cp --overwrite "$f" "dbfs:/Volumes/gjhinc/ingestion/bronze_landing/$name"
+            echo "Uploaded $name to UC volume"
           done
 
       - name: Commit results to repo

@@ -101,6 +101,18 @@ class TestSearchOrchestrator:
                             rows = [json.loads(line) for line in f]
                             assert len(rows) == 3
                             assert all(r.get("search_url") for r in rows)
+                            # Verify all bronze schema fields present
+                            for r in rows:
+                                assert "ParcelNumber" in r
+                                assert "ListingKey" in r
+                                assert "UnparsedAddress" in r
+                                assert "PostalCode" in r
+                                assert "PropertyType" in r
+                                assert "ListPrice" in r
+                                assert "TaxAnnualAmount" in r
+                                assert "MonthlyHOAAmt" in r
+                                assert "BedroomsTotal" in r
+                                assert "BathroomsTotal" in r
 
     def test_writes_jsonl_when_records_found(self):
         records = [

@@ -16,7 +16,7 @@ resources:
         rentready.tenant: ${var.tenant}
         rentready.licensed_catalog: ${var.licensed_catalog}
         rentready.public_catalog: ${var.public_catalog}
-        rentready.landing_path: /tmp/rentready/bronze_landing
+        rentready.landing_path: /Volumes/gjhinc/ingestion/bronze_landing
 
         # Underwriting assumptions
         rentready.assumption.annual_rate: "0.075"
