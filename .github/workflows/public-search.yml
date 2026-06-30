@@ -1,0 +1,71 @@
+name: Public Portal Search
+
+on:
+  schedule:
+    # 8 AM CST (14:00 UTC) — daily
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      city:
+        description: City to search
+        default: Richardson
+        type: string
+      state:
+        description: State code
+        default: TX
+        type: string
+      beds:
+        description: Minimum bedrooms
+        default: "3"
+        type: string
+      baths:
+        description: Minimum bathrooms
+        default: "2"
+        type: string
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run public search
+        id: search
+        env:
+          RENTREADY_LANDING: ${{ runner.temp }}/bronze_landing
+        run: |
+          python -m src.ingestion.public_search \
+            --city "${{ inputs.city || 'Richardson' }}" \
+            --state "${{ inputs.state || 'TX' }}" \
+            --beds "${{ inputs.beds || '3' }}" \
+            --baths "${{ inputs.baths || '2' }}"
+
+          count=$(ls "$RENTREADY_LANDING"/*.jsonl 2>/dev/null | wc -l)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Files written: $count"
+
+      - name: Upload listings artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: listings-${{ github.run_id }}
+          path: ${{ runner.temp }}/bronze_landing/*.jsonl
+          retention-days: 7
+
+      - name: Write GitHub summary
+        run: |
+          echo "## Public Search Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **City:** ${{ inputs.city || 'Richardson' }}, ${{ inputs.state || 'TX' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Criteria:** ${{ inputs.beds || '3' }} bed / ${{ inputs.baths || '2' }} bath" >> $GITHUB_STEP_SUMMARY
+          echo "- **Files written:** ${{ steps.search.outputs.count }}" >> $GITHUB_STEP_SUMMARY
