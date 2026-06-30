@@ -5,14 +5,9 @@ resources:
       target: ${bundle.target}
       catalog: ${var.licensed_catalog}
       channel: CURRENT
+      serverless: true
       development: false
-      photon: false
-      clusters:
-        - label: default
-          num_workers: 1
-          spark_conf:
-            spark.databricks.cluster.profile: singleNode
-            spark.master: local[*]
+      photon: true
       libraries:
         - notebook:
             path: /Workspace/Shared/rentready/notebooks/pipeline

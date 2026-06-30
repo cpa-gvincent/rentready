@@ -13,10 +13,10 @@ variables:
     default: demo
   licensed_catalog:
     description: Unity Catalog for licensed, provenance-restricted data (MLS/AVM).
-    default: rentready_dev_licensed
+    default: gjhinc
   public_catalog:
     description: Unity Catalog for public data (gov/assessor/licensed public APIs).
-    default: rentready_dev_public
+    default: gjhinc
   warehouse_id:
     description: SQL warehouse the app queries.
     default: ""
@@ -28,8 +28,8 @@ targets:
     workspace:
       host: https://dbc-64a7e3a8-a95d.cloud.databricks.com
     variables:
-      licensed_catalog: rentready_dev_licensed
-      public_catalog: rentready_dev_public
+      licensed_catalog: gjhinc
+      public_catalog: gjhinc
 
   staging:
     mode: production

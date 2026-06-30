@@ -7,21 +7,14 @@ resources:
         timezone_id: UTC
         pause_status: UNPAUSED
 
-      job_clusters:
-        - job_cluster_key: default
-          new_cluster:
-            num_workers: 1
-            spark_version: 15.4.x-scala2.12
-            node_type_id: i3.xlarge
-            spark_conf:
-              spark.databricks.cluster.profile: singleNode
-              spark.master: local[*]
-            data_security_mode: SINGLE_USER
-            runtime_engine: STANDARD
-
       tasks:
         - task_key: ingest
-          job_cluster_key: default
+          new_cluster:
+            num_workers: 0
+            spark_version: 15.4.x-scala2.12
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+            runtime_engine: STANDARD
           spark_python_task:
             python_file: /Workspace/Shared/rentready/src/ingestion/reso_ingest.py
 
@@ -34,7 +27,12 @@ resources:
         - task_key: rank
           depends_on:
             - task_key: pipeline
-          job_cluster_key: default
+          new_cluster:
+            num_workers: 0
+            spark_version: 15.4.x-scala2.12
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+            runtime_engine: STANDARD
           spark_python_task:
             python_file: /Workspace/Shared/rentready/src/ml/ranking.py
 
