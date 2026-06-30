@@ -7,34 +7,32 @@ resources:
         timezone_id: UTC
         pause_status: UNPAUSED
 
+      # Serverless environment (required by serverless-only workspaces).
+      # Created via the REST API because bundle schema v1.5.0 doesn't
+      # expose the `environments` / `environment_key` fields yet.
+      # Pipeline created via bundle deploy:
+      #   databricks bundle deploy -t dev -p "george@gjh-inc.com" --select rentready_pipeline
+      # Job created via API:
+      #   POST /api/2.2/jobs/create
+
       tasks:
         - task_key: ingest
-          new_cluster:
-            num_workers: 0
-            spark_version: 15.4.x-scala2.12
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
-            runtime_engine: STANDARD
+          environment_key: serverless_env
           spark_python_task:
-            python_file: /Workspace/Shared/rentready/src/ingestion/reso_ingest.py
+            python_file: /Workspace/Users/george@gjh-inc.com/.bundle/rentready/dev/files/src/ingestion/reso_ingest.py
 
         - task_key: pipeline
           depends_on:
             - task_key: ingest
           pipeline_task:
-            pipeline_id: ${resources.pipelines.rentready_pipeline.pipeline_id}
+            pipeline_id: "017e646f-31fa-45cb-a224-de816431b4fe"
 
         - task_key: rank
           depends_on:
             - task_key: pipeline
-          new_cluster:
-            num_workers: 0
-            spark_version: 15.4.x-scala2.12
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
-            runtime_engine: STANDARD
+          environment_key: serverless_env
           spark_python_task:
-            python_file: /Workspace/Shared/rentready/src/ml/ranking.py
+            python_file: /Workspace/Users/george@gjh-inc.com/.bundle/rentready/dev/files/src/ml/ranking.py
 
       queue:
         enabled: true
