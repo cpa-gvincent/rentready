@@ -1,0 +1,8 @@
+# RentReady Databricks App — served to users via a SQL warehouse.
+# Deployed by databricks bundle deploy; the bundle resource is in resources/app.yml.
+name: rentready_app
+description: Serves ranked deal screens from the gold layer.
+resources:
+  - name: default
+    source_code_path: .
+    source_subdirectory: backend
