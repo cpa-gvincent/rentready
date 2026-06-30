@@ -1,0 +1,37 @@
+# RentReady SDP pipeline: bronze -> silver -> gold.
+include:
+  - ../databricks.yml
+
+resources:
+  pipelines:
+    rentready_pipeline:
+      name: rentready_pipeline
+      target: ${bundle.target}
+      catalog: ${var.licensed_catalog}
+      channel: CURRENT
+      development: ${bundle.target == 'dev'}
+      photon: false
+      clusters:
+        - label: default
+          num_workers: 1
+          spark_conf:
+            spark.databricks.cluster.profile: singleNode
+            spark.master: local[*]
+      libraries:
+        - notebook:
+            path: /Workspace/Shared/rentready/notebooks/pipeline
+
+      configuration:
+        rentready.tenant: ${var.tenant}
+        rentready.licensed_catalog: ${var.licensed_catalog}
+        rentready.public_catalog: ${var.public_catalog}
+        rentready.landing_path: /tmp/rentready/bronze_landing
+
+        # Underwriting assumptions
+        rentready.assumption.annual_rate: "0.075"
+        rentready.assumption.term_years: "30"
+        rentready.assumption.ltv_target: "0.75"
+        rentready.assumption.annual_insurance: "1800"
+        rentready.assumption.rent_to_price_monthly: "0.008"
+        rentready.assumption.closing_pct: "0.03"
+        rentready.assumption.dscr_threshold: "1.20"

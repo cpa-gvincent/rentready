@@ -1,0 +1,45 @@
+# RentReady scheduled job: ingest -> pipeline -> ML rank.
+include:
+  - ../databricks.yml
+
+resources:
+  jobs:
+    rentready_ingest_and_screen:
+      name: rentready_ingest_and_screen
+      schedule:
+        quartz_cron_expression: "0 0 */2 * * ?"
+        timezone: UTC
+        pause_status: UNPAUSED
+
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+
+      tasks:
+        - task_key: ingest
+          python_wheel_task:
+            package_name: rentready
+            entry_point: reso_ingest
+          libraries:
+            - pypi:
+                package: requests
+          spark_python_task:
+            python_file: /Workspace/Shared/rentready/src/ingestion/reso_ingest.py
+
+        - task_key: pipeline
+          depends_on:
+            - task_key: ingest
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.rentready_pipeline.pipeline_id}
+
+        - task_key: rank
+          depends_on:
+            - task_key: pipeline
+          python_wheel_task:
+            package_name: rentready
+            entry_point: ml_rank
+          spark_python_task:
+            python_file: /Workspace/Shared/rentready/src/ml/ranking.py
+
+      queue:
+        enabled: true

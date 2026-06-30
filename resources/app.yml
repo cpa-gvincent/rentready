@@ -1,0 +1,14 @@
+# RentReady Databricks App — serves gold ranked results via SQL warehouse.
+include:
+  - ../databricks.yml
+
+resources:
+  apps:
+    rentready_app:
+      name: rentready_app
+      mode: ${bundle.target == 'prod' ? 'PRODUCTION' : 'DEVELOPMENT'}
+      warehouse_id: ${var.warehouse_id}
+      resources:
+        - name: default
+          source_code_path: /Workspace/Shared/rentready/app
+          source_subdirectory: backend
