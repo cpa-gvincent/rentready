@@ -1,2 +1,5 @@
 *.zip
 *:Zone.Identifier
+/tmp/
+__pycache__/
+*.pyc
