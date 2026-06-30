@@ -26,7 +26,7 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com
+      host: https://dbc-64a7e3a8-a95d.cloud.databricks.com
     variables:
       licensed_catalog: rentready_dev_licensed
       public_catalog: rentready_dev_public
@@ -34,7 +34,7 @@ targets:
   staging:
     mode: production
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com
+      host: https://dbc-64a7e3a8-a95d.cloud.databricks.com
       root_path: /Workspace/Shared/.bundle/${bundle.name}/staging
     variables:
       licensed_catalog: rentready_staging_licensed
@@ -43,7 +43,7 @@ targets:
   prod:
     mode: production
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com
+      host: https://dbc-64a7e3a8-a95d.cloud.databricks.com
       root_path: /Workspace/Shared/.bundle/${bundle.name}/prod
     variables:
       licensed_catalog: rentready_prod_licensed
