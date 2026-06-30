@@ -1,9 +1,9 @@
 """
 Tests for the public portal search module.
 
-Tests cover the data model, bronze-row mapping, CLI parsing, and
-orchestrator logic (with mocked HTTP). Live-scraper functions are tested
-with stubbed responses.
+Tests focus on the data model, bronze-row mapping, orchestrator
+logic, and the search-URL fallback.  Live Playwright scrapers are
+exercised by the GitHub Actions integration test.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from src.ingestion.public_search import (
     SearchCriteria,
     Listing,
     search,
+    search_urls,
     main,
 )
 
@@ -28,6 +29,16 @@ class TestSearchCriteria:
         assert c.state == "TX"
         assert c.beds == 3
         assert c.baths == 2
+
+
+class TestSearchUrls:
+    def test_returns_urls_for_all_sources(self):
+        urls = search_urls(SearchCriteria())
+        assert "redfin" in urls
+        assert "zillow" in urls
+        assert "movoto" in urls
+        assert "richardson" in urls["redfin"].lower()
+        assert "3-beds" in urls["zillow"].lower()
 
 
 class TestListing:
@@ -74,78 +85,22 @@ class TestListing:
         assert row["value_estimate"] == 250_000.0
 
 
-REDFIN_HOMES_PAYLOAD = json.dumps({
-    "payload": {
-        "homes": [
-            {
-                "id": 12345,
-                "streetLine": "123 Main St",
-                "city": "Richardson",
-                "state": "TX",
-                "zip": "75080",
-                "price": 350000,
-                "beds": 3,
-                "baths": 2,
-                "sqFt": 1800,
-                "lotSize": 7200,
-                "url": "/tx/richardson/123-main-st",
-                "parcelNumber": "123456789012",
-            }
-        ]
-    }
-})
-
-
-class TestRedfinSearch:
-    def test_parses_home(self):
-        with patch("src.ingestion.public_search._fetch", return_value=REDFIN_HOMES_PAYLOAD):
-            from src.ingestion.public_search import _redfin_search
-            records = _redfin_search(SearchCriteria())
-            assert len(records) == 1
-            assert records[0]["ListingKey"] == "redfin_12345"
-            assert records[0]["ListPrice"] == 350000
-            assert records[0]["ParcelNumber"] == "123456789012"
-            assert records[0]["BedroomsTotal"] == 3
-
-
-ZILLOW_PAYLOAD = json.dumps({
-    "cat1": {
-        "searchResults": [
-            {
-                "zpid": 67890,
-                "address": "456 Oak Ave",
-                "city": "Richardson",
-                "state": "TX",
-                "zipcode": "75081",
-                "price": "$375,000",
-                "beds": 3,
-                "baths": 2,
-                "area": 1700,
-                "detailUrl": "https://www.zillow.com/homedetails/456-Oak-Ave",
-            }
-        ]
-    }
-})
-
-
-class TestZillowSearch:
-    def test_parses_listing(self):
-        with patch("src.ingestion.public_search._fetch", return_value=ZILLOW_PAYLOAD):
-            from src.ingestion.public_search import _zillow_search
-            records = _zillow_search(SearchCriteria())
-            assert len(records) == 1
-            assert records[0]["ListingKey"] == "zillow_67890"
-            assert records[0]["ListPrice"] == 375000
-
-
 class TestSearchOrchestrator:
-    def test_skips_unknown_source(self, caplog):
-        import logging
-        caplog.set_level(logging.WARNING)
-        with tempfile.TemporaryDirectory() as landing:
-            count = search(SearchCriteria(), sources=["nonexistent"], landing=landing, dry_run=True)
-            assert count == 0
-            assert "Unknown source" in caplog.text
+    def test_fallback_urls_when_scrapers_return_empty(self):
+        """When scrapers are blocked, search-URL fallback records are created."""
+        with patch("src.ingestion.public_search._redfin_search", return_value=[]):
+            with patch("src.ingestion.public_search._zillow_search", return_value=[]):
+                with patch("src.ingestion.public_search._movoto_search", return_value=[]):
+                    with tempfile.TemporaryDirectory() as landing:
+                        count = search(SearchCriteria(), landing=landing)
+                        # One fallback URL record per source
+                        assert count == 3
+                        files = [f for f in os.listdir(landing) if f.endswith(".jsonl")]
+                        assert len(files) == 1
+                        with open(os.path.join(landing, files[0])) as f:
+                            rows = [json.loads(line) for line in f]
+                            assert len(rows) == 3
+                            assert all(r.get("search_url") for r in rows)
 
     def test_writes_jsonl_when_records_found(self):
         records = [
@@ -153,7 +108,7 @@ class TestSearchOrchestrator:
             {"ListingKey": "test_2", "ListPrice": 350000, "source": "test"},
         ]
         with patch.dict("src.ingestion.public_search.SOURCES",
-                        {"test": lambda c: records}):
+                        {"test": lambda c: records}, clear=True):
             with tempfile.TemporaryDirectory() as landing:
                 count = search(SearchCriteria(), landing=landing)
                 assert count == 2
@@ -166,11 +121,19 @@ class TestSearchOrchestrator:
     def test_dry_run_writes_nothing(self):
         records = [{"ListingKey": "test_1", "ListPrice": 300000, "source": "test"}]
         with patch.dict("src.ingestion.public_search.SOURCES",
-                        {"test": lambda c: records}):
+                        {"test": lambda c: records}, clear=True):
             with tempfile.TemporaryDirectory() as landing:
                 count = search(SearchCriteria(), landing=landing, dry_run=True)
                 assert count == 1
                 assert len(os.listdir(landing)) == 0
+
+    def test_skips_unknown_source(self, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        with tempfile.TemporaryDirectory() as landing:
+            count = search(SearchCriteria(), sources=["nonexistent"], landing=landing, dry_run=True)
+            assert count == 0
+            assert "Unknown source" in caplog.text
 
 
 class TestCli:

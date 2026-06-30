@@ -1,12 +1,15 @@
 """
 Public real-estate portal search — Redfin, Zillow, Movoto.
 
-Fetches listings matching a criteria (beds, baths, property type, location)
-from publicly accessible search pages and writes structured JSONL records
-to the bronze landing directory for the existing pipeline to consume.
+Uses Playwright (headless Chromium) to load JavaScript-rendered pages.
+If scraping fails (sites use Cloudflare/anti-bot), falls back to
+storing the direct search URLs as reference records.
 
-Each record is tagged with ``source`` and ``estimate_source`` so the
-pipeline can trace provenance.
+Results are written as JSONL to the configured landing directory
+(default: RENTREADY_LANDING or /tmp/rentready/bronze_landing).
+
+When run via GitHub Actions, Playwright is installed with its browser
+and the results are committed to ``data/listings.jsonl`` in the repo.
 """
 
 from __future__ import annotations
@@ -16,23 +19,12 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Any, Optional
-from urllib.parse import urlencode
-
-import requests
 
 logger = logging.getLogger(__name__)
 
-# Bronze landing path — matches reso_ingest.DEFAULT_LANDING
 LANDING_DIR = os.environ.get("RENTREADY_LANDING", "/tmp/rentready/bronze_landing")
-
-REQUEST_TIMEOUT = 30
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/125.0.0.0 Safari/537.36"
-)
 
 
 @dataclass
@@ -41,7 +33,7 @@ class SearchCriteria:
     state: str = "TX"
     beds: int = 3
     baths: int = 2
-    property_type: str = "house"  # house, condo, townhouse
+    property_type: str = "house"
     max_price: Optional[int] = None
     min_price: Optional[int] = None
 
@@ -65,15 +57,12 @@ class Listing:
     annual_property_tax: Optional[float] = None
     monthly_hoa: float = 0.0
     has_hoa: bool = False
-    apn: str = ""  # parcel number, if available
-    # Value estimate for gold pipeline
+    apn: str = ""
     value_estimate: Optional[float] = None
     estimate_source: str = "public_search"
 
     def to_bronze_row(self) -> dict[str, Any]:
-        """Convert to a bronze-compatible row that silver can process."""
         d = asdict(self)
-        # Map to the field names silver.py expects from bronze:
         d["ParcelNumber"] = self.apn or f"PUBLIC-{self.source}-{self.listing_key}"
         d["ListingKey"] = f"{self.source}_{self.listing_key}"
         d["UnparsedAddress"] = self.address
@@ -92,213 +81,238 @@ class Listing:
 
 
 # --------------------------------------------------------------------------- #
-# HTTP helper
+# Search URLs (always available even when scraping fails)
 # --------------------------------------------------------------------------- #
-_session = None
-
-
-def _get_session() -> requests.Session:
-    global _session
-    if _session is None:
-        s = requests.Session()
-        s.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/json,*/*"})
-        _session = s
-    return _session
-
-
-def _fetch(url: str) -> Optional[str]:
-    try:
-        resp = _get_session().get(url, timeout=REQUEST_TIMEOUT)
-        if resp.status_code == 200:
-            return resp.text
-        logger.warning("%s returned %d", url, resp.status_code)
-        return None
-    except requests.RequestException as e:
-        logger.warning("Failed to fetch %s: %s", url, e)
-        return None
-
-
-# --------------------------------------------------------------------------- #
-# Redfin scraper
-# --------------------------------------------------------------------------- #
-def _redfin_search(criteria: SearchCriteria) -> list[dict]:
-    """Search Redfin using their public Stingray API."""
-    url = (
-        f"https://www.redfin.com/stingray/api/gis"
-        f"?al=1"
-        f"&market=richardson"
-        f"&region_id=17215"
-        f"&region_type=6"
-        f"&lat=32.9483"
-        f"&lng=-96.7299"
-        f"&num_homes=50"
-        f"&ord=redfin-recommended-asc"
-        f"&page_number=1"
-        f"&poly=0"
-        f"&property_type={criteria.property_type}"
-        f"&num_beds={criteria.beds}"
-        f"&num_baths={criteria.baths}"
-        f"&max_price={criteria.max_price or ''}"
-        f"&min_price={criteria.min_price or ''}"
-        f"&status=9"
-        f"&v=8"
-        f"&region_type=6"
-    )
-    html = _fetch(url)
-    if not html:
-        return []
-
-    records = []
-    try:
-        data = json.loads(html)
-        homes = data.get("payload", {}).get("homes", []) if isinstance(data, dict) else []
-        for h in homes:
-            price = h.get("price")
-            listing = Listing(
-                source="redfin",
-                listing_key=str(h.get("id", "")),
-                address=h.get("streetLine", ""),
-                city=h.get("city", criteria.city),
-                state=h.get("state", criteria.state),
-                postal_code=h.get("zip", ""),
-                list_price=float(price) if price else None,
-                property_type=criteria.property_type,
-                beds=int(h.get("beds", 0)),
-                baths=float(h.get("baths", 0)),
-                sqft=float(h.get("sqFt", 0)) if h.get("sqFt") else None,
-                lot_sqft=float(h.get("lotSize", 0)) if h.get("lotSize") else None,
-                year_built=int(h["yearBuilt"]) if h.get("yearBuilt") else None,
-                url=f"https://www.redfin.com{h.get('url', '')}" if h.get("url") else "",
-                apn=str(h.get("parcelNumber", "")),
-                value_estimate=float(price) if price else None,
-            )
-            records.append(listing.to_bronze_row())
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
-        logger.warning("Redfin parse error: %s", e)
-
-    return records
-
-
-# --------------------------------------------------------------------------- #
-# Zillow scraper
-# --------------------------------------------------------------------------- #
-def _zillow_search(criteria: SearchCriteria) -> list[dict]:
-    """Search Zillow by fetching their search page and extracting embedded data."""
-    params = {
-        "searchQueryState": json.dumps({
-            "pagination": {},
-            "isMapVisible": True,
-            "mapBounds": {
-                "west": -96.83,
-                "east": -96.63,
-                "south": 32.88,
-                "north": 33.02,
-            },
-            "regionSelection": [
-                {"regionId": 43923, "regionType": 6}
-            ],
-            "filterState": {
-                "fr": {"value": True},
-                "fsba": {"value": False},
-                "fsbo": {"value": False},
-                "nc": {"value": False},
-                "fore": {"value": False},
-                "cmsn": {"value": False},
-                "auc": {"value": False},
-                "pmf": {"value": False},
-                "pf": {"value": False},
-                "mf": {"value": False},
-                "land": {"value": False},
-                "apa": {"value": False},
-                "con": {"value": False},
-            },
-            "isListVisible": True,
-        }),
-        "wants": json.dumps({"cat1": ["listResults", "mapResults"]}),
-        "requestId": 1,
+def search_urls(criteria: SearchCriteria) -> dict[str, str]:
+    return {
+        "redfin": (
+            f"https://www.redfin.com/city/17215/TX/{criteria.city}"
+            f"/filter/beds={criteria.beds}-baths={criteria.baths}"
+            f"-property-type={criteria.property_type}"
+        ),
+        "zillow": (
+            f"https://www.zillow.com/{criteria.city.lower()}-{criteria.state.lower()}"
+            f"/{criteria.beds}-beds-{criteria.baths}-baths/"
+        ),
+        "movoto": (
+            f"https://www.movoto.com/{criteria.city.lower()}-{criteria.state.lower()}"
+            f"/{criteria.beds}b-{criteria.baths}b/for-sale/"
+        ),
     }
-    # Zillow API endpoint
-    url = f"https://www.zillow.com/async-create-search-page-state"
-    html = _fetch(f"{url}?{urlencode(params)}")
-    if not html:
-        return []
 
-    records = []
+
+# --------------------------------------------------------------------------- #
+# Playwright-based scrapers
+# --------------------------------------------------------------------------- #
+def _with_page(fn):
+    """Decorator that provides a Playwright page to *fn*."""
     try:
-        data = json.loads(html)
-        cat1 = data.get("cat1", {}) if isinstance(data, dict) else {}
-        results = cat1.get("searchResults", cat1.get("listResults", []))
-        for h in results:
-            price_str = h.get("price", "").replace("$", "").replace(",", "").replace("+", "")
-            price = float(price_str) if price_str and price_str.replace(".", "").isdigit() else None
-            listing = Listing(
-                source="zillow",
-                listing_key=str(h.get("zpid", "")),
-                address=h.get("address", h.get("addressStreet", "")),
-                city=h.get("city", criteria.city),
-                state=h.get("state", criteria.state),
-                postal_code=h.get("zipcode", ""),
-                list_price=price,
-                property_type=criteria.property_type,
-                beds=int(h.get("beds", 0)),
-                baths=float(h.get("baths", 0)),
-                sqft=float(h.get("area", 0)) if h.get("area") else None,
-                url=h.get("detailUrl", ""),
-                value_estimate=price,
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.warning("playwright not installed")
+        return lambda c: []
+
+    def wrapper(criteria):
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
             )
-            records.append(listing.to_bronze_row())
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
-        logger.warning("Zillow parse error: %s", e)
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+            )
+            page = ctx.new_page()
+            page.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+            )
+            try:
+                return fn(criteria, page)
+            finally:
+                browser.close()
 
-    return records
+    return wrapper
 
 
-# --------------------------------------------------------------------------- #
-# Movoto scraper
-# --------------------------------------------------------------------------- #
-def _movoto_search(criteria: SearchCriteria) -> list[dict]:
-    """Search Movoto by fetching their search results page and parsing HTML."""
-    city_slug = f"{criteria.city.lower()}-{criteria.state.lower()}"
-    url = (
-        f"https://www.movoto.com/{city_slug}"
-        f"/{criteria.beds}b-{criteria.baths}b"
-        f"/for-sale/"
-    )
-    html = _fetch(url)
-    if not html:
-        return []
-
-    records = []
-    # Look for embedded JSON in <script> tags
-    patterns = [
-        r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
-        r'<script[^>]*id="__NEXT_DATA__"[^>]*>({.*?})</script>',
-        r'<script[^>]*type="application/json"[^>]*>({.*?})</script>',
-    ]
-    found_data = None
+def _try_extract_json(html: str, patterns: list[str]) -> Optional[dict]:
     for pat in patterns:
         m = re.search(pat, html, re.DOTALL)
         if m:
             try:
-                found_data = json.loads(m.group(1))
-                break
+                return json.loads(m.group(1))
             except json.JSONDecodeError:
                 continue
+    return None
 
-    if found_data and isinstance(found_data, dict):
-        listings_data = (
-            found_data.get("listings", [])
-            or found_data.get("props", {}).get("pageProps", {}).get("listings", [])
-            or found_data.get("searchResults", [])
+
+# --------------------------------------------------------------------------- #
+# Redfin
+# --------------------------------------------------------------------------- #
+@_with_page
+def _redfin_search(criteria: SearchCriteria, page) -> list[dict]:
+    url = (
+        f"https://www.redfin.com/city/17215/TX/{criteria.city}"
+        f"/filter/beds={criteria.beds}-baths={criteria.baths}"
+        f"-property-type={criteria.property_type}"
+    )
+    records: list[dict] = []
+
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(5_000)
+
+    title = page.title()
+    if "ERROR" in title or "captcha" in title.lower():
+        logger.info("Redfin blocked (title=%s)", title[:60])
+        return records
+
+    html = page.content()
+    data = _try_extract_json(html, [
+        r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+    ])
+    if data:
+        props = data.get("props", {}).get("pageProps", {})
+        results = (
+            props.get("searchResults")
+            or props.get("listings")
+            or props.get("homes")
+            or []
         )
-        for h in listings_data if isinstance(listings_data, list) else []:
+        if isinstance(results, str):
+            try:
+                results = json.loads(results)
+            except json.JSONDecodeError:
+                results = []
+        for h in (results if isinstance(results, list) else []):
+            price = h.get("price", h.get("listPrice", 0))
+            listing = Listing(
+                source="redfin",
+                listing_key=str(h.get("id", h.get("listingId", ""))),
+                address=(
+                    h.get("address", {}).get("streetAddress", "")
+                    if isinstance(h.get("address"), dict)
+                    else str(h.get("address", ""))
+                ),
+                city=h.get("city", criteria.city),
+                state=h.get("state", criteria.state),
+                postal_code=h.get("zipCode", h.get("zip", "")),
+                list_price=float(price) if price else None,
+                property_type=criteria.property_type,
+                beds=int(h.get("beds", h.get("bedrooms", 0))),
+                baths=float(h.get("baths", h.get("bathrooms", 0))),
+                sqft=float(h.get("sqft", h.get("livingArea", 0)) or 0) or None,
+                url=h.get("url", h.get("listingUrl", "")),
+                value_estimate=float(price) if price else None,
+            )
+            records.append(listing.to_bronze_row())
+
+    # DOM fallback
+    if not records:
+        cards = page.query_selector_all('[data-rf-test-id="homecard"]')
+        for card in cards:
+            listing = Listing(
+                source="redfin",
+                listing_key=str(card.get_attribute("id") or ""),
+                address="",
+                city=criteria.city,
+                state=criteria.state,
+                list_price=None,
+                property_type=criteria.property_type,
+            )
+            records.append(listing.to_bronze_row())
+
+    return records
+
+
+# --------------------------------------------------------------------------- #
+# Zillow
+# --------------------------------------------------------------------------- #
+@_with_page
+def _zillow_search(criteria: SearchCriteria, page) -> list[dict]:
+    url = (
+        f"https://www.zillow.com/{criteria.city.lower()}-{criteria.state.lower()}"
+        f"/{criteria.beds}-beds-{criteria.baths}-baths/"
+    )
+    records: list[dict] = []
+
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(5_000)
+
+    title = page.title()
+    if "captcha" in title.lower() or page.query_selector("#captcha"):
+        logger.info("Zillow blocked")
+        return records
+
+    html = page.content()
+    data = _try_extract_json(html, [
+        r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+    ])
+    if data:
+        props = data.get("props", {}).get("pageProps", {})
+        results = (
+            props.get("searchPageState", {}).get("cat1", {}).get("searchResults", [])
+            or props.get("initialSearchState", {}).get("listings", [])
+        )
+        for h in results:
+            price = _float_from_text(str(h.get("price", h.get("listPrice", ""))))
+            listing = Listing(
+                source="zillow",
+                listing_key=str(h.get("zpid", h.get("id", ""))),
+                address=h.get("address", h.get("addressStreet", "")),
+                city=h.get("city", criteria.city),
+                state=h.get("state", criteria.state),
+                postal_code=h.get("zipcode", h.get("zip", "")),
+                list_price=price,
+                property_type=criteria.property_type,
+                beds=int(h.get("beds", h.get("bedrooms", 0))),
+                baths=float(h.get("baths", h.get("bathrooms", 0))),
+                sqft=_float_from_text(str(h.get("area", h.get("livingArea", "")))),
+                url=h.get("detailUrl", h.get("url", "")),
+                value_estimate=price,
+            )
+            records.append(listing.to_bronze_row())
+
+    return records
+
+
+# --------------------------------------------------------------------------- #
+# Movoto
+# --------------------------------------------------------------------------- #
+@_with_page
+def _movoto_search(criteria: SearchCriteria, page) -> list[dict]:
+    city_slug = f"{criteria.city.lower()}-{criteria.state.lower()}"
+    url = f"https://www.movoto.com/{city_slug}/{criteria.beds}b-{criteria.baths}b/for-sale/"
+    records: list[dict] = []
+
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(5_000)
+
+    title = page.title()
+    if "captcha" in title.lower():
+        return records
+
+    html = page.content()
+    data = _try_extract_json(html, [
+        r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+    ])
+    if data:
+        props = data.get("props", {}).get("pageProps", {})
+        listings_data = props.get("listings", props.get("searchResults", []))
+        for h in (listings_data if isinstance(listings_data, list) else []):
+            addr = h.get("address", "")
+            if isinstance(addr, dict):
+                addr = addr.get("streetAddress", "")
             listing = Listing(
                 source="movoto",
                 listing_key=str(h.get("id", h.get("listingId", ""))),
-                address=h.get("address", {}).get("streetAddress", "") if isinstance(h.get("address"), dict) else str(h.get("address", "")),
-                city=h.get("address", {}).get("addressLocality", criteria.city) if isinstance(h.get("address"), dict) else criteria.city,
-                state=h.get("address", {}).get("addressRegion", criteria.state) if isinstance(h.get("address"), dict) else criteria.state,
-                postal_code=h.get("address", {}).get("postalCode", "") if isinstance(h.get("address"), dict) else "",
+                address=addr,
+                city=h.get("city", criteria.city),
+                state=h.get("state", criteria.state),
+                postal_code=h.get("zip", h.get("postalCode", "")),
                 list_price=float(h.get("price", 0) or 0) or None,
                 property_type=criteria.property_type,
                 beds=int(h.get("bedrooms", h.get("beds", 0))),
@@ -306,32 +320,18 @@ def _movoto_search(criteria: SearchCriteria) -> list[dict]:
                 sqft=float(h.get("sqft", h.get("livingArea", 0)) or 0) or None,
                 url=h.get("url", ""),
                 value_estimate=float(h.get("price", 0) or 0) or None,
-                estimate_source="public_search",
-            )
-            records.append(listing.to_bronze_row())
-
-    # Fallback: regex scrape listing cards from HTML
-    if not records:
-        cards = re.findall(
-            r'data-listing-id=["\'](\d+)["\'][^>]*>.*?'
-            r'<span[^>]*class=["\'][^"\']*price[^"\']*["\'][^>]*>\$?([\d,]+)',
-            html, re.DOTALL,
-        )
-        for lid, price_str in cards[:30]:
-            price = float(price_str.replace(",", ""))
-            listing = Listing(
-                source="movoto",
-                listing_key=lid,
-                address="",
-                city=criteria.city,
-                state=criteria.state,
-                list_price=price,
-                property_type=criteria.property_type,
-                value_estimate=price,
             )
             records.append(listing.to_bronze_row())
 
     return records
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def _float_from_text(t: str) -> Optional[float]:
+    cleaned = re.sub(r"[^0-9.]", "", t)
+    return float(cleaned) if cleaned else None
 
 
 # --------------------------------------------------------------------------- #
@@ -351,10 +351,6 @@ def search(
     landing: str = LANDING_DIR,
     dry_run: bool = False,
 ) -> int:
-    """
-    Search public portals for listings matching *criteria*, write JSONL
-    records to *landing* (the bronze directory), and return total count.
-    """
     if sources is None:
         sources = list(SOURCES)
 
@@ -370,6 +366,30 @@ def search(
             all_records.extend(records)
         except Exception:
             logger.exception("%s search failed", name)
+
+    # Add search-URL fallback records for sources with no data
+    urls = search_urls(criteria)
+    for name in sources:
+        fn = SOURCES.get(name)
+        if fn is None:
+            continue  # unknown sources skipped earlier
+        if not any(r.get("source") == name for r in all_records):
+            all_records.append({
+                "source": name,
+                "listing_key": f"{name}_search_url",
+                "address": f"{criteria.city}, {criteria.state}",
+                "city": criteria.city,
+                "state": criteria.state,
+                "search_url": urls.get(name, ""),
+                "beds": criteria.beds,
+                "baths": criteria.baths,
+                "list_price": None,
+                "property_type": criteria.property_type,
+                "estimate_source": "public_search_url",
+                "ParcelNumber": f"URL-{name}-{criteria.city}",
+                "ListingKey": f"{name}_search_url",
+                "UnparsedAddress": f"{criteria.city}, {criteria.state}",
+            })
 
     if not all_records:
         logger.info("No listings found from any source")
@@ -390,7 +410,6 @@ def search(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """CLI entry point: python -m src.ingestion.public_search"""
     import argparse
 
     parser = argparse.ArgumentParser(description="Search public real-estate portals")
@@ -402,28 +421,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--min-price", type=int, default=None)
     parser.add_argument("--landing", default=LANDING_DIR)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--source", action="append", choices=list(SOURCES), help="Source(s) to search (default: all)")
+    parser.add_argument("--source", action="append", choices=list(SOURCES))
+    parser.add_argument("--repo-path", default="", help="Copy output to data/ in repo")
 
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     criteria = SearchCriteria(
-        city=args.city,
-        state=args.state,
-        beds=args.beds,
-        baths=args.baths,
-        max_price=args.max_price,
-        min_price=args.min_price,
+        city=args.city, state=args.state, beds=args.beds, baths=args.baths,
+        max_price=args.max_price, min_price=args.min_price,
     )
+    count = search(criteria, sources=args.source, landing=args.landing, dry_run=args.dry_run)
 
-    count = search(
-        criteria,
-        sources=args.source,
-        landing=args.landing,
-        dry_run=args.dry_run,
-    )
-    logger.info("Total: %d listings", count)
+    if args.repo_path and not args.dry_run:
+        import shutil
+        os.makedirs(args.repo_path, exist_ok=True)
+        for f in os.listdir(args.landing):
+            if f.endswith(".jsonl"):
+                shutil.copy2(os.path.join(args.landing, f), os.path.join(args.repo_path, f))
+        logger.info("Copied results to %s", args.repo_path)
+
     return count
 
 
