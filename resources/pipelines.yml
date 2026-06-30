@@ -10,7 +10,7 @@ resources:
       photon: true
       libraries:
         - notebook:
-            path: /Workspace/Shared/rentready/notebooks/pipeline
+            path: ${workspace.root_path}/files/notebooks/pipeline.py
 
       configuration:
         rentready.tenant: ${var.tenant}
